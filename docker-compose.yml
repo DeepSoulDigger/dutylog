@@ -5,6 +5,11 @@ services:
     restart: unless-stopped
     ports:
       - "8501:8501"
+    environment:
+      - TZ=Asia/Shanghai
+      - DUTYLOG_PASSWORD=dutylog123
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
+    mem_limit: 512m
+    cpus: 1.0
