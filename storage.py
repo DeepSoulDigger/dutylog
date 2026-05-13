@@ -1,13 +1,14 @@
 """
-记录存储模块 — RecordStore 接口 + 两个适配器 + Excel 导出
+记录存储模块 — RecordStore 接口 + 两个适配器
 
 RecordStore 隐藏了文件系统细节：目录结构、文件命名、JSON 序列化、
-损坏文件恢复。调用者只注入一个实例，不直接操作 os / json / open。
+损坏文件恢复、Excel 导出。调用者只注入一个实例，不直接操作 os / json / open。
 """
 
 import json
 import os
 from abc import ABC, abstractmethod
+from io import BytesIO
 
 import pandas as pd
 
@@ -18,7 +19,7 @@ from utils import now_cn
 # 接口
 # ---------------------------------------------------------------------------
 class RecordStore(ABC):
-    """记录持久化的接缝。一个适配器 = 假设性；两个 = 真实。"""
+    """记录持久化抽象接口。DiskRecordStore 用于生产，MemoryRecordStore 用于测试。"""
 
     @abstractmethod
     def save(self, record: dict) -> str:
@@ -41,14 +42,49 @@ class RecordStore(ABC):
         ...
 
     @abstractmethod
+    def rebuild_excel(self) -> str:
+        """从所有 JSON 记录重建 Excel 文件，返回文件路径（或空字符串）。"""
+        ...
+
+    @abstractmethod
     def excel_exists(self) -> bool:
         """Excel 汇总文件是否存在"""
         ...
 
     @abstractmethod
-    def excel_bytes(self):
+    def excel_bytes(self) -> bytes:
         """返回 Excel 文件的二进制内容（用于下载）"""
         ...
+
+
+# ---------------------------------------------------------------------------
+# 共享：将记录行转换为 DataFrame
+# ---------------------------------------------------------------------------
+def _records_to_df(store: RecordStore) -> pd.DataFrame:
+    """遍历 store 中所有记录，构造成 DataFrame。损坏文件跳过。"""
+    rows = []
+    for fname in store.list_all():
+        try:
+            rec = store.load(fname)
+        except (json.JSONDecodeError, OSError):
+            continue
+        inspection_summary = "; ".join(
+            f"{k}:{'正常' if v.get('ok') else '异常(' + v.get('note', '') + ')'}"
+            for k, v in rec.get("inspection", {}).items()
+        )
+        rows.append({
+            "记录ID": rec.get("id", ""),
+            "值班人": rec.get("name", ""),
+            "日期": rec.get("date", ""),
+            "班次": rec.get("shift", ""),
+            "值班状态": rec.get("status", ""),
+            "核心事件": rec.get("events", ""),
+            "设备巡检": inspection_summary,
+            "待办交接": rec.get("handover", ""),
+            "附件数量": len(rec.get("attachments", [])),
+            "记录时间": rec.get("created_at", ""),
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +137,12 @@ class DiskRecordStore(RecordStore):
 
     # ---- Excel ----
 
+    def rebuild_excel(self) -> str:
+        excel_path = os.path.join(self._data_dir, "duty_logs.xlsx")
+        df = _records_to_df(self)
+        df.to_excel(excel_path, index=False, engine="openpyxl")
+        return excel_path
+
     def excel_exists(self) -> bool:
         return os.path.exists(os.path.join(self._data_dir, "duty_logs.xlsx"))
 
@@ -145,59 +187,17 @@ class MemoryRecordStore(RecordStore):
         self._attachments.setdefault(record_id, []).append(fake_path)
         return fake_path
 
-    def _set_excel_bytes(self, data: bytes):
-        self._excel_bytes = data
-
     # ---- Excel ----
+
+    def rebuild_excel(self) -> str:
+        df = _records_to_df(self)
+        buf = BytesIO()
+        df.to_excel(buf, index=False, engine="openpyxl")
+        self._excel_bytes = buf.getvalue()
+        return ""
 
     def excel_exists(self) -> bool:
         return len(self._excel_bytes) > 0
 
     def excel_bytes(self) -> bytes:
         return self._excel_bytes
-
-
-# ---------------------------------------------------------------------------
-# Excel 导出（独立函数，只用 RecordStore 公共接口）
-# ---------------------------------------------------------------------------
-def rebuild_excel_from_store(store: RecordStore) -> str:
-    """从 store 中的所有 JSON 记录重建 Excel，写入 store 管理的目录。
-
-    返回 Excel 文件路径（DiskRecordStore）或空字符串（MemoryRecordStore）。
-    """
-    rows = []
-    for fname in store.list_all():
-        try:
-            rec = store.load(fname)
-        except (json.JSONDecodeError, OSError):
-            continue
-        inspection_summary = "; ".join(
-            f"{k}:{'正常' if v.get('ok') else '异常(' + v.get('note', '') + ')'}"
-            for k, v in rec.get("inspection", {}).items()
-        )
-        rows.append({
-            "记录ID": rec.get("id", ""),
-            "值班人": rec.get("name", ""),
-            "日期": rec.get("date", ""),
-            "班次": rec.get("shift", ""),
-            "值班状态": rec.get("status", ""),
-            "核心事件": rec.get("events", ""),
-            "设备巡检": inspection_summary,
-            "待办交接": rec.get("handover", ""),
-            "附件数量": len(rec.get("attachments", [])),
-            "记录时间": rec.get("created_at", ""),
-        })
-
-    df = pd.DataFrame(rows) if rows else pd.DataFrame()
-
-    if isinstance(store, DiskRecordStore):
-        excel_path = os.path.join(store._data_dir, "duty_logs.xlsx")
-        df.to_excel(excel_path, index=False, engine="openpyxl")
-        return excel_path
-    else:
-        # MemoryRecordStore：不写磁盘，存 bytes 以供验证
-        from io import BytesIO
-        buf = BytesIO()
-        df.to_excel(buf, index=False, engine="openpyxl")
-        store._set_excel_bytes(buf.getvalue())
-        return ""

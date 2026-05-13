@@ -19,7 +19,7 @@ from utils import (
     build_record,
     generate_report_text,
 )
-from storage import DiskRecordStore, rebuild_excel_from_store
+from storage import DiskRecordStore
 
 # ---------------------------------------------------------------------------
 # 路径配置
@@ -249,7 +249,7 @@ if submit_btn:
 
     record = build_record(record_id, name, duty_date, shift, status, events, inspection, handover, saved_paths)
     json_path = store.save(record)
-    excel_path = rebuild_excel_from_store(store)
+    excel_path = store.rebuild_excel()
 
     st.session_state.last_record = record
 

@@ -21,7 +21,6 @@ from utils import (
 from storage import (
     DiskRecordStore,
     MemoryRecordStore,
-    rebuild_excel_from_store,
 )
 
 TZ_CN_REF = timezone(timedelta(hours=8))
@@ -189,7 +188,7 @@ class TestMemoryRecordStore:
 
     def test_excel_roundtrip(self, mem_store, sample_record):
         mem_store.save(sample_record)
-        rebuild_excel_from_store(mem_store)
+        mem_store.rebuild_excel()
         assert mem_store.excel_exists()
         import pandas as pd
         from io import BytesIO
@@ -242,12 +241,12 @@ class TestDiskRecordStore:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# rebuild_excel_from_store
+# rebuild_excel
 # ═══════════════════════════════════════════════════════════════════════════
 class TestRebuildExcelFromStore:
     def test_creates_excel(self, disk_store, sample_record):
         disk_store.save(sample_record)
-        excel_path = rebuild_excel_from_store(disk_store)
+        excel_path = disk_store.rebuild_excel()
         assert os.path.exists(excel_path)
         import pandas as pd
         df = pd.read_excel(excel_path)
@@ -260,13 +259,13 @@ class TestRebuildExcelFromStore:
         bad = os.path.join(disk_store._data_dir, "bad.json")
         with open(bad, "w") as f:
             f.write("{invalid json")
-        excel_path = rebuild_excel_from_store(disk_store)
+        excel_path = disk_store.rebuild_excel()
         import pandas as pd
         df = pd.read_excel(excel_path)
         assert len(df) == 1
 
     def test_empty_store(self, disk_store):
-        excel_path = rebuild_excel_from_store(disk_store)
+        excel_path = disk_store.rebuild_excel()
         import pandas as pd
         df = pd.read_excel(excel_path)
         assert len(df) == 0
