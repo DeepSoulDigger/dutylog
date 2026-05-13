@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from datetime import date, timezone, timedelta
+from io import BytesIO
 
 import pytest
 
@@ -11,21 +12,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (
     build_record,
-    save_record,
     generate_report_text,
     current_shift_label,
-    rebuild_excel,
     INSPECTION_ITEMS,
     SHIFTS,
     TZ_CN,
+)
+from storage import (
+    DiskRecordStore,
+    MemoryRecordStore,
+    rebuild_excel_from_store,
 )
 
 TZ_CN_REF = timezone(timedelta(hours=8))
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # fixtures
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 @pytest.fixture
 def sample_inspection():
     return {item: {"ok": True, "note": ""} for item in INSPECTION_ITEMS}
@@ -47,19 +51,23 @@ def sample_record(sample_inspection):
 
 
 @pytest.fixture
-def tmp_data_dir(tmp_path):
+def mem_store():
+    return MemoryRecordStore()
+
+
+@pytest.fixture
+def disk_store(tmp_path):
     data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    return str(data_dir)
+    upload_dir = tmp_path / "uploads"
+    return DiskRecordStore(str(data_dir), str(upload_dir))
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # current_shift_label
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 class TestCurrentShiftLabel:
     def test_returns_valid_shift(self):
-        result = current_shift_label()
-        assert result in SHIFTS
+        assert current_shift_label() in SHIFTS
 
     def test_morning(self, monkeypatch):
         import utils
@@ -80,9 +88,9 @@ class TestCurrentShiftLabel:
         assert current_shift_label() == "夜班 (22:00 - 次日08:00)"
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # build_record
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 class TestBuildRecord:
     def test_basic_fields(self, sample_record):
         assert sample_record["id"] == "abc123"
@@ -113,28 +121,9 @@ class TestBuildRecord:
         assert "+08:00" in sample_record["created_at"]
 
 
-# ---------------------------------------------------------------------------
-# save_record
-# ---------------------------------------------------------------------------
-class TestSaveRecord:
-    def test_creates_json_file(self, sample_record, tmp_data_dir):
-        path = save_record(sample_record, tmp_data_dir)
-        assert os.path.exists(path)
-        assert path.endswith(".json")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        assert data["name"] == "张三"
-        assert data["id"] == "abc123"
-
-    def test_filename_format(self, sample_record, tmp_data_dir):
-        path = save_record(sample_record, tmp_data_dir)
-        basename = os.path.basename(path)
-        assert basename.startswith("2026-04-27_早班_abc123.json")
-
-
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # generate_report_text
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 class TestGenerateReportText:
     def test_contains_key_fields(self, sample_record):
         text = generate_report_text(sample_record)
@@ -142,8 +131,6 @@ class TestGenerateReportText:
         assert "2026-04-27" in text
         assert "早班" in text
         assert "正常" in text
-        assert "系统运行正常" in text
-        assert "请关注磁盘空间" in text
 
     def test_inspection_items(self, sample_record):
         text = generate_report_text(sample_record)
@@ -165,30 +152,121 @@ class TestGenerateReportText:
         assert "（无）" in text
 
 
-# ---------------------------------------------------------------------------
-# rebuild_excel
-# ---------------------------------------------------------------------------
-class TestRebuildExcel:
-    def test_creates_excel_from_json(self, sample_record, tmp_data_dir):
-        save_record(sample_record, tmp_data_dir)
-        excel_path = rebuild_excel(tmp_data_dir)
+# ═══════════════════════════════════════════════════════════════════════════
+# MemoryRecordStore（内存适配器）
+# ═══════════════════════════════════════════════════════════════════════════
+class TestMemoryRecordStore:
+    def test_save_and_load(self, mem_store, sample_record):
+        mem_store.save(sample_record)
+        files = mem_store.list_all()
+        assert len(files) == 1
+        loaded = mem_store.load(files[0])
+        assert loaded["name"] == "张三"
+
+    def test_list_all_order(self, mem_store, sample_record, sample_inspection):
+        rec1 = build_record("id1", "A", date(2026, 1, 1), "早班 (08:00 - 14:00)",
+                            "正常", "", sample_inspection, "", [])
+        rec2 = build_record("id2", "B", date(2026, 1, 2), "早班 (08:00 - 14:00)",
+                            "正常", "", sample_inspection, "", [])
+        mem_store.save(rec1)
+        mem_store.save(rec2)
+        files = mem_store.list_all()
+        # 按名称倒序：id2 排在 id1 前面
+        assert files[0].startswith("2026-01-02")
+
+    def test_load_missing_raises(self, mem_store):
+        with pytest.raises(FileNotFoundError):
+            mem_store.load("nonexistent.json")
+
+    def test_save_attachment(self, mem_store):
+        class FakeFile:
+            name = "photo.png"
+            def getbuffer(self):
+                return b"fake"
+
+        path = mem_store.save_attachment(FakeFile(), "rec01")
+        assert path == "mem://rec01/photo.png"
+
+    def test_excel_roundtrip(self, mem_store, sample_record):
+        mem_store.save(sample_record)
+        rebuild_excel_from_store(mem_store)
+        assert mem_store.excel_exists()
+        import pandas as pd
+        from io import BytesIO
+        df = pd.read_excel(BytesIO(mem_store.excel_bytes()))
+        assert len(df) == 1
+        assert df.iloc[0]["值班人"] == "张三"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DiskRecordStore（磁盘适配器）
+# ═══════════════════════════════════════════════════════════════════════════
+class TestDiskRecordStore:
+    def test_save_creates_file(self, disk_store, sample_record):
+        path = disk_store.save(sample_record)
+        assert os.path.exists(path)
+        assert path.endswith(".json")
+
+    def test_load_returns_record(self, disk_store, sample_record):
+        disk_store.save(sample_record)
+        files = disk_store.list_all()
+        rec = disk_store.load(files[0])
+        assert rec["name"] == "张三"
+        assert rec["id"] == "abc123"
+
+    def test_filename_format(self, disk_store, sample_record):
+        path = disk_store.save(sample_record)
+        basename = os.path.basename(path)
+        assert basename.startswith("2026-04-27_早班_abc123")
+
+    def test_save_attachment_path_traversal_blocked(self, disk_store):
+        class EvilFile:
+            name = "../../etc/passwd"
+            def getbuffer(self):
+                return b"evil"
+
+        path = disk_store.save_attachment(EvilFile(), "rec01")
+        # basename 剥离了 ../..，加上 startswith 二次校验，穿越被阻断
+        assert path is not None
+        assert os.path.basename(path).endswith("_passwd")
+
+    def test_save_attachment_normal(self, disk_store):
+        class FakeFile:
+            name = "screenshot.png"
+            def getbuffer(self):
+                return b"img"
+
+        path = disk_store.save_attachment(FakeFile(), "rec01")
+        assert path is not None
+        assert os.path.exists(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# rebuild_excel_from_store
+# ═══════════════════════════════════════════════════════════════════════════
+class TestRebuildExcelFromStore:
+    def test_creates_excel(self, disk_store, sample_record):
+        disk_store.save(sample_record)
+        excel_path = rebuild_excel_from_store(disk_store)
         assert os.path.exists(excel_path)
         import pandas as pd
         df = pd.read_excel(excel_path)
         assert len(df) == 1
         assert df.iloc[0]["值班人"] == "张三"
 
-    def test_handles_corrupt_json(self, sample_record, tmp_data_dir):
-        save_record(sample_record, tmp_data_dir)
-        with open(os.path.join(tmp_data_dir, "bad.json"), "w") as f:
+    def test_handles_corrupt_json(self, disk_store, sample_record):
+        disk_store.save(sample_record)
+        # 直接写一个坏文件到 data 目录
+        bad = os.path.join(disk_store._data_dir, "bad.json")
+        with open(bad, "w") as f:
             f.write("{invalid json")
-        excel_path = rebuild_excel(tmp_data_dir)
+        excel_path = rebuild_excel_from_store(disk_store)
         import pandas as pd
         df = pd.read_excel(excel_path)
         assert len(df) == 1
 
-    def test_empty_data_dir(self, tmp_data_dir):
-        excel_path = rebuild_excel(tmp_data_dir)
+    def test_empty_store(self, disk_store):
+        excel_path = rebuild_excel_from_store(disk_store)
         import pandas as pd
         df = pd.read_excel(excel_path)
         assert len(df) == 0

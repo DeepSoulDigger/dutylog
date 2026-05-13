@@ -16,12 +16,10 @@ from utils import (
     INSPECTION_ITEMS,
     STATUS_OPTIONS,
     current_shift_label,
-    save_uploaded_file,
     build_record,
-    save_record,
-    rebuild_excel,
     generate_report_text,
 )
+from storage import DiskRecordStore, rebuild_excel_from_store
 
 # ---------------------------------------------------------------------------
 # 路径配置
@@ -30,8 +28,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
+# ---------------------------------------------------------------------------
+# 存储（所有文件系统 I/O 走这个接缝）
+# ---------------------------------------------------------------------------
+store = DiskRecordStore(data_dir=DATA_DIR, upload_dir=UPLOAD_DIR)
 
 # ---------------------------------------------------------------------------
 # 页面配置（必须是第一个 Streamlit 命令）
@@ -43,11 +43,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
 # ---------------------------------------------------------------------------
 # 简易密码认证
 # ---------------------------------------------------------------------------
 def check_password():
-    """Returns `True` if the user had the correct password."""
     def password_entered():
         if st.session_state["password"] == os.environ.get("DUTYLOG_PASSWORD", "dutylog123"):
             st.session_state["password_correct"] = True
@@ -62,6 +62,7 @@ def check_password():
     if not st.session_state["password_correct"]:
         st.text_input("密码错误，请重新输入", type="password", on_change=password_entered, key="password")
         st.stop()
+
 
 check_password()
 
@@ -94,10 +95,7 @@ with st.sidebar:
     st.title("📋 值班日志系统")
     st.divider()
     st.subheader("📁 历史记录")
-    history_files = sorted(
-        [f for f in os.listdir(DATA_DIR) if f.endswith(".json")],
-        reverse=True,
-    )
+    history_files = store.list_all()
     if history_files:
         selected_file = st.selectbox(
             "选择记录查看",
@@ -107,8 +105,7 @@ with st.sidebar:
         )
         if selected_file:
             try:
-                with open(os.path.join(DATA_DIR, selected_file), "r", encoding="utf-8") as f:
-                    hist = json.load(f)
+                hist = store.load(selected_file)
             except (json.JSONDecodeError, OSError):
                 st.error("无法读取该记录文件，文件可能已损坏。")
                 st.stop()
@@ -123,15 +120,13 @@ with st.sidebar:
         st.info("暂无历史记录。")
 
     st.divider()
-    excel_path = os.path.join(DATA_DIR, "duty_logs.xlsx")
-    if os.path.exists(excel_path):
-        with open(excel_path, "rb") as f:
-            st.download_button(
-                "📊 下载全部记录 (Excel)",
-                data=f.read(),
-                file_name="duty_logs.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    if store.excel_exists():
+        st.download_button(
+            "📊 下载全部记录 (Excel)",
+            data=store.excel_bytes(),
+            file_name="duty_logs.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 # ---------------------------------------------------------------------------
 # 主页面
@@ -248,13 +243,13 @@ if submit_btn:
     record_id = uuid.uuid4().hex[:12]
     saved_paths = []
     for uf in (uploaded_files or []):
-        path = save_uploaded_file(uf, record_id, UPLOAD_DIR)
+        path = store.save_attachment(uf, record_id)
         if path:
             saved_paths.append(path)
 
     record = build_record(record_id, name, duty_date, shift, status, events, inspection, handover, saved_paths)
-    json_path = save_record(record, DATA_DIR)
-    excel_path = rebuild_excel(DATA_DIR)
+    json_path = store.save(record)
+    excel_path = rebuild_excel_from_store(store)
 
     st.session_state.last_record = record
 
@@ -299,4 +294,4 @@ if preview_btn:
 # 页脚
 # ---------------------------------------------------------------------------
 st.divider()
-st.caption("通用值班日志系统 v1.1  ·  Powered by Streamlit")
+st.caption("通用值班日志系统 v1.2  ·  Powered by Streamlit")
