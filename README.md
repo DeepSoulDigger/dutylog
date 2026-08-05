@@ -58,8 +58,52 @@ Docker 部署时这两个目录已通过 volume 映射到宿主机，数据不�
 | 中班 | 14:00 - 22:00 |
 | 夜班 | 22:00 - 次日 08:00 |
 
+> 所有时间均基于 `Asia/Shanghai`（UTC+8）时区判定。
+
 ## 技术栈
 
 - Python 3.11
 - Streamlit
 - Pandas / OpenPyXL
+
+## 开发
+
+### 项目结构
+
+```text
+dutylog/
+├── duty_log_app.py       # Streamlit 主入口（UI 层）
+├── utils.py              # 领域逻辑：时间/班次、记录构建、日报格式化（无副作用）
+├── storage.py            # 持久化抽象：RecordStore 接口 + Disk / Memory 两个适配器
+├── tests/
+│   └── test_app.py       # 单元测试（pytest）
+├── data/                 # 运行时生成的 JSON / Excel
+├── uploads/              # 运行时上传的附件
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt      # 运行时依赖
+└── requirements-dev.txt  # 开发与测试依赖
+```
+
+### 跑测试
+
+```bash
+# 安装测试依赖
+pip install -r requirements-dev.txt
+
+# 运行测试套件
+pytest tests/ -v
+```
+
+当前共 **29** 个测试，覆盖时间判定、记录构建、日报生成、内存 / 磁盘两种存储适配器以及 Excel 重建的健壮性。
+
+### 代码风格
+
+- 领域逻辑（`utils.py`）保持纯函数，无文件 I/O，便于单元测试
+- 所有文件系统访问都走 `RecordStore` 抽象（`storage.py`），便于替换与测试
+- `MemoryRecordStore` 用于测试，避免污染真实目录
+
+## 反馈与贡献
+
+- **Bug 报告 / 功能建议**：使用 [Issue 模板](../../issues/new/choose) 提交
+- **Pull Request**：请阅读 [PR 模板](.github/PULL_REQUEST_TEMPLATE.md)，并确保 CI 全绿
