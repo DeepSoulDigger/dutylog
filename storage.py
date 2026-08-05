@@ -68,9 +68,17 @@ def _records_to_df(store: RecordStore) -> pd.DataFrame:
             rec = store.load(fname)
         except (json.JSONDecodeError, OSError):
             continue
+        # 跳过非 dict 记录（合法 JSON 但结构不匹配）
+        if not isinstance(rec, dict):
+            continue
+        # 跳过 inspection 字段不是 dict 的记录
+        inspection = rec.get("inspection", {})
+        if not isinstance(inspection, dict):
+            inspection = {}
         inspection_summary = "; ".join(
             f"{k}:{'正常' if v.get('ok') else '异常(' + v.get('note', '') + ')'}"
-            for k, v in rec.get("inspection", {}).items()
+            for k, v in inspection.items()
+            if isinstance(v, dict)
         )
         rows.append({
             "记录ID": rec.get("id", ""),

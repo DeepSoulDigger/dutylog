@@ -116,6 +116,11 @@ class TestBuildRecord:
                            "正常", "", sample_inspection, "", ["/tmp/a.png", None, "/tmp/b.jpg"])
         assert rec["attachments"] == ["/tmp/a.png", "/tmp/b.jpg"]
 
+    def test_strips_name_whitespace(self, sample_inspection):
+        rec = build_record("id-name", "  张三  ", date(2026, 1, 1), "早班 (08:00 - 14:00)",
+                           "正常", "", sample_inspection, "", [])
+        assert rec["name"] == "张三"
+
     def test_timezone_aware_timestamp(self, sample_record):
         assert "+08:00" in sample_record["created_at"]
 
@@ -263,6 +268,45 @@ class TestRebuildExcelFromStore:
         import pandas as pd
         df = pd.read_excel(excel_path)
         assert len(df) == 1
+
+    def test_handles_non_dict_record(self, disk_store, sample_record):
+        # 写入一个有效 JSON 但不是 dict 的文件（合法 JSON 数组）
+        disk_store.save(sample_record)
+        bad = os.path.join(disk_store._data_dir, "list.json")
+        with open(bad, "w") as f:
+            f.write("[1, 2, 3]")
+        excel_path = disk_store.rebuild_excel()
+        import pandas as pd
+        df = pd.read_excel(excel_path)
+        assert len(df) == 1  # 只保留有效的那条
+
+    def test_handles_non_dict_inspection(self, disk_store, sample_record):
+        # 写入一个 inspection 字段为字符串而不是 dict 的记录
+        disk_store.save(sample_record)
+        bad_record = {
+            "id": "bad01",
+            "name": "异常",
+            "date": "2026-01-01",
+            "shift": "早班",
+            "status": "正常",
+            "events": "",
+            "inspection": "not-a-dict",  # 不是 dict
+            "handover": "",
+            "attachments": [],
+            "created_at": "2026-01-01T00:00:00+08:00",
+        }
+        with open(os.path.join(disk_store._data_dir, "bad01.json"), "w") as f:
+            json.dump(bad_record, f, ensure_ascii=False)
+        # 不应崩溃；坏记录的 inspection 列为空，但其它字段保留
+        excel_path = disk_store.rebuild_excel()
+        import pandas as pd
+        df = pd.read_excel(excel_path)
+        assert len(df) == 2
+        bad_row = df[df["记录ID"] == "bad01"].iloc[0]
+        # 非 dict 时 inspection 汇总为空（pandas 读出来是 NaN）
+        assert pd.isna(bad_row["设备巡检"])
+        # 其它字段正常保留
+        assert bad_row["值班人"] == "异常"
 
     def test_empty_store(self, disk_store):
         excel_path = disk_store.rebuild_excel()

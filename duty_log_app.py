@@ -7,7 +7,6 @@ import html
 import json
 import os
 import uuid
-from datetime import date
 
 import streamlit as st
 
@@ -16,6 +15,7 @@ from utils import (
     INSPECTION_ITEMS,
     STATUS_OPTIONS,
     current_shift_label,
+    now_cn,
     build_record,
     generate_report_text,
 )
@@ -107,15 +107,16 @@ with st.sidebar:
             try:
                 hist = store.load(selected_file)
             except (json.JSONDecodeError, OSError):
-                st.error("无法读取该记录文件，文件可能已损坏。")
-                st.stop()
-            st.json(hist)
-            st.download_button(
-                "⬇️ 下载该记录 JSON",
-                data=json.dumps(hist, ensure_ascii=False, indent=2),
-                file_name=selected_file,
-                mime="application/json",
-            )
+                # 单个文件损坏不应阻塞整个页面 — 仅给出提示，继续渲染
+                st.error(f"无法读取记录 `{selected_file}`，文件可能已损坏。")
+            else:
+                st.json(hist)
+                st.download_button(
+                    "⬇️ 下载该记录 JSON",
+                    data=json.dumps(hist, ensure_ascii=False, indent=2),
+                    file_name=selected_file,
+                    mime="application/json",
+                )
     else:
         st.info("暂无历史记录。")
 
@@ -140,7 +141,7 @@ with st.container():
     with col1:
         name = st.text_input("值班人姓名", placeholder="请输入姓名")
     with col2:
-        duty_date = st.date_input("值班日期", value=date.today())
+        duty_date = st.date_input("值班日期", value=now_cn().date())
     with col3:
         shift = st.selectbox(
             "班次",
@@ -217,9 +218,6 @@ st.markdown("#### 🚀 操作")
 
 col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
 
-if "last_record" not in st.session_state:
-    st.session_state.last_record = None
-
 with col_btn1:
     submit_btn = st.button("✅ 提交日志", type="primary", use_container_width=True)
 
@@ -251,8 +249,6 @@ if submit_btn:
     json_path = store.save(record)
     excel_path = store.rebuild_excel()
 
-    st.session_state.last_record = record
-
     st.success("🎉 日志提交成功！")
     st.caption(f"JSON 已保存至：`{json_path}`")
     st.caption(f"Excel 已更新至：`{excel_path}`")
@@ -263,15 +259,13 @@ if submit_btn:
 # 日报预览逻辑
 # ---------------------------------------------------------------------------
 if preview_btn:
-    if st.session_state.last_record is None:
-        if not name.strip():
-            st.warning("请至少填写值班人姓名后再生成预览。")
-            st.stop()
-        record_id = uuid.uuid4().hex[:12]
-        saved_paths = []
-        record = build_record(record_id, name, duty_date, shift, status, events, inspection, handover, saved_paths)
-    else:
-        record = st.session_state.last_record
+    if not name.strip():
+        st.warning("请至少填写值班人姓名后再生成预览。")
+        st.stop()
+    # 始终基于当前表单状态生成预览，避免显示过期的提交记录
+    record_id = uuid.uuid4().hex[:12]
+    saved_paths = []
+    record = build_record(record_id, name, duty_date, shift, status, events, inspection, handover, saved_paths)
 
     report_text = generate_report_text(record)
 

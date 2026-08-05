@@ -49,7 +49,7 @@ def build_record(
     """构建一条值班记录字典"""
     return {
         "id": record_id,
-        "name": name,
+        "name": name.strip(),
         "date": duty_date.isoformat(),
         "shift": SHIFTS[shift],
         "status": status,
